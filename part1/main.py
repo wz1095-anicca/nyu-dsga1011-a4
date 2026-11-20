@@ -45,7 +45,30 @@ def do_train(args, model, train_dataloader, save_dir="./out"):
     # You can use progress_bar.update(1) to see the progress during training
     # You can refer to the pytorch tutorial covered in class for reference
 
-    raise NotImplementedError
+    for epoch in range(num_epochs):
+        for batch in train_dataloader:
+            # Move every tensor in the batch (input_ids, attention_mask, token_type_ids, labels)
+            # to the same device as the model.
+            batch = {k: v.to(device) for k, v in batch.items()}
+
+            # Forward pass: because the batch contains "labels", the HF classification model
+            # computes the cross-entropy loss for us and returns it as outputs.loss.
+            outputs = model(**batch)
+            loss = outputs.loss
+
+            # Backward pass: compute gradients of the loss w.r.t. all trainable parameters.
+            loss.backward()
+
+            # Update the parameters, then advance the linear learning-rate schedule by one step.
+            optimizer.step()
+            lr_scheduler.step()
+
+            # PyTorch accumulates gradients across backward() calls, so clear them before the next batch.
+            optimizer.zero_grad()
+
+            # Show progress and the current loss so divergence is visible during training.
+            progress_bar.update(1)
+            progress_bar.set_postfix(epoch=epoch, loss=f"{loss.item():.4f}")
 
     ##### YOUR CODE ENDS HERE ######
 
@@ -93,7 +116,23 @@ def create_augmented_dataloader(args, dataset):
     # dataloader will be for the original training split augmented with 5k random transformed examples from the training set.
     # You may find it helpful to see how the dataloader was created at other place in this code.
 
-    raise NotImplementedError
+    # Pick 5,000 random training examples (fixed seed, so the same subset every run) and apply the
+    # same transformation used for the transformed test set, so training sees the shifted distribution.
+    sampled_train = dataset["train"].shuffle(seed=42).select(range(5000))
+    transformed_train = sampled_train.map(custom_transform, load_from_cache_file=False)
+
+    # Augmented training set = all 25,000 original examples + the 5,000 transformed copies.
+    augmented_train = datasets.concatenate_datasets([dataset["train"], transformed_train])
+
+    # Same preprocessing as the original training data: tokenize, drop raw text, rename the label
+    # column to what the model's forward() expects, and return PyTorch tensors.
+    augmented_tokenized = augmented_train.map(tokenize_function, batched=True, load_from_cache_file=False)
+    augmented_tokenized = augmented_tokenized.remove_columns(["text"])
+    augmented_tokenized = augmented_tokenized.rename_column("label", "labels")
+    augmented_tokenized.set_format("torch")
+
+    # Shuffle so the transformed examples are mixed with the originals instead of all coming last.
+    train_dataloader = DataLoader(augmented_tokenized, shuffle=True, batch_size=args.batch_size)
 
     ##### YOUR CODE ENDS HERE ######
 

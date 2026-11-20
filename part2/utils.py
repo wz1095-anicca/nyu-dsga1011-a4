@@ -4,6 +4,7 @@ import os
 import re
 import pickle
 import random
+import time
 from tqdm import tqdm
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,6 +13,11 @@ from typing import List, Any
 import torch
 
 DB_PATH = 'data/flight_database.db'
+
+# Per-query time limit (seconds). Generated SQL sometimes lists tables without joining them, which
+# turns into a cartesian product that never finishes; such a query is interrupted after this limit
+# and recorded as "Query timed out". The slowest gold dev query takes about 1 s, so 30 s is generous.
+QUERY_TIMEOUT_SECS = 30
 
 def compute_metrics(gt_path: str, model_path: str, gt_query_records: str = None, model_query_records: str = None):
     '''
@@ -92,7 +98,7 @@ def compute_records(processed_qs: List[str]):
         * processed_qs (List[str]): The list of SQL queries to execute
     '''
     num_threads = 10
-    timeout_secs = 120
+    timeout_secs = 600  # overall safety net; runaway queries are already stopped by QUERY_TIMEOUT_SECS
 
     pool = ThreadPoolExecutor(num_threads)
     futures = []
@@ -124,12 +130,20 @@ def compute_records(processed_qs: List[str]):
 
 def compute_record(query_id, query):
     conn = sqlite3.connect(DB_PATH)
+    # SQLite calls this handler periodically while a query runs; returning True interrupts the query.
+    # Unlike cancelling the future, this really stops a runaway query, so it cannot keep using CPU.
+    deadline = time.monotonic() + QUERY_TIMEOUT_SECS
+    conn.set_progress_handler(lambda: time.monotonic() > deadline, 100_000)
     cursor = conn.cursor()
 
     try:
         cursor.execute(query)
         rec = cursor.fetchall()
         error_msg = ""
+    except sqlite3.OperationalError as e:
+        # Report an interrupted query the same way the starter code reports a timeout.
+        rec = []
+        error_msg = "Query timed out" if "interrupted" in str(e) else f"{type(e).__name__}: {e}"
     except Exception as e:
         rec = []
         error_msg = f"{type(e).__name__}: {e}"
